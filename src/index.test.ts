@@ -2,8 +2,8 @@ import { readFileSync } from "node:fs";
 import { describe, expect, test } from "bun:test";
 import { createAssistantMessageEventStream } from "@earendil-works/pi-ai";
 import type { Api, Model } from "@earendil-works/pi-ai";
-import type { ExtensionAPI, ExtensionContext, SessionBeforeCompactEvent, SessionEntry, SessionMessageEntry } from "@earendil-works/pi-coding-agent";
-import { compact } from "@earendil-works/pi-coding-agent";
+import type { CompactionResult, ExtensionAPI, ExtensionContext, SessionBeforeCompactEvent, SessionEntry, SessionMessageEntry } from "@earendil-works/pi-coding-agent";
+import { buildSessionContext, compact } from "@earendil-works/pi-coding-agent";
 // test-only parity sentinel: Pi does not publicly export prepareCompaction/estimateContextTokens.
 // if this private path breaks, update the sentinel or switch to a public export.
 import {
@@ -337,13 +337,21 @@ function expectAsyncPreparationToMatchPi(
 	expect([...asyncPreparation.fileOps.edited].sort()).toEqual([...piPreparation.fileOps.edited].sort());
 }
 
+function recordFromUnknown(value: unknown): Record<string, unknown> | undefined {
+	if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+	return value as Record<string, unknown>;
+}
+
 function textBlocksFromContent(content: unknown): string[] {
 	if (!Array.isArray(content)) return [];
 	return content.flatMap((block) => {
-		if (!block || typeof block !== "object" || Array.isArray(block)) return [];
-		const fields = block as Record<string, unknown>;
-		return fields.type === "text" && typeof fields.text === "string" ? [fields.text] : [];
+		const fields = recordFromUnknown(block);
+		return fields?.type === "text" && typeof fields.text === "string" ? [fields.text] : [];
 	});
+}
+
+function textBlocksFromMessage(message: unknown): string[] {
+	return textBlocksFromContent(recordFromUnknown(message)?.content);
 }
 
 function deterministicSummaryText(messages: readonly unknown[]): string {
@@ -965,6 +973,54 @@ describe("extension hooks", () => {
 		});
 		expect(notifyMessages[0]).toContain("status: failed");
 		expect(notifyMessages[0]).toContain("error: apply failed: render failed");
+	});
+
+	test("hands off compaction that lets Pi rebuild context without gaps through appended tail", async () => {
+		const { handlers } = extensionHarness({
+			startAsyncJob: (jobCtx, state, options) => startAsyncJobWithDeps(jobCtx, state, asyncJobDeps(), options),
+		});
+		const turnEndHandler = handlers.get("turn_end");
+		const beforeCompactHandler = handlers.get("session_before_compact");
+		if (!turnEndHandler) throw new Error("turn_end handler was not registered");
+		if (!beforeCompactHandler) throw new Error("session_before_compact handler was not registered");
+
+		const snapshotEntries = compactableEntries();
+		turnEndHandler({}, asyncJobContext(snapshotEntries));
+		await Promise.resolve();
+
+		const currentEntries = [
+			...snapshotEntries,
+			assistantEntry("a2", "u2", "assistant appended after async start"),
+			userEntry("u3", "a2", "user appended after async start"),
+		];
+		const handoff = await beforeCompactHandler(validationEvent(), asyncJobContext(currentEntries));
+		if (!handoff || typeof handoff !== "object" || !("compaction" in handoff)) {
+			throw new Error("expected async compaction handoff");
+		}
+		const compaction = (handoff as { readonly compaction: CompactionResult }).compaction;
+		const appliedCompaction: SessionEntry = {
+			type: "compaction",
+			id: "c1",
+			parentId: currentEntries[currentEntries.length - 1]?.id ?? null,
+			timestamp,
+			summary: compaction.summary,
+			firstKeptEntryId: compaction.firstKeptEntryId,
+			tokensBefore: compaction.tokensBefore,
+			details: compaction.details,
+			fromHook: true,
+		};
+
+		const rebuiltMessages = buildSessionContext([...currentEntries, appliedCompaction]).messages;
+		const summaryMessage = recordFromUnknown(rebuiltMessages[0]);
+		const rawTextMessages = rebuiltMessages.flatMap(textBlocksFromMessage);
+
+		expect(summaryMessage?.role).toBe("compactionSummary");
+		expect(summaryMessage?.summary).toBe("async summary");
+		expect(rawTextMessages).toEqual([
+			"raw tail starts here",
+			"assistant appended after async start",
+			"user appended after async start",
+		]);
 	});
 
 	test("status command reports an empty auto-start window for small context models", async () => {
