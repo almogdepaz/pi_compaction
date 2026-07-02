@@ -1,23 +1,50 @@
-import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { EXTENSION_NAME, InvalidationReason } from "./constants";
 import { startAsyncJob } from "./job";
-export { prepareAsyncCompaction } from "./preparation";
+import type { StartAsyncJobOutcome } from "./job";
 import { createRuntimeState, formatRuntimeStatus, markStale } from "./runtime-state";
-export { validateReadyJob } from "./validation";
-import { getAsyncCompactionMarker, getStartRatio, getTimeoutMs, isEnabled } from "./utils";
+import { formatStartWindow, getAsyncCompactionMarker, getCompactionSettings, getStartRatio, getStartWindow, getTimeoutMs, isEnabled } from "./utils";
 import { validateReadyJob } from "./validation";
 
-export default function asyncPrefixCompaction(pi: ExtensionAPI) {
+interface AsyncPrefixCompactionDependencies {
+	readonly startAsyncJob: typeof startAsyncJob;
+}
+
+const defaultDependencies: AsyncPrefixCompactionDependencies = {
+	startAsyncJob,
+};
+
+export default function asyncPrefixCompaction(pi: ExtensionAPI, deps: AsyncPrefixCompactionDependencies = defaultDependencies) {
 	const state = createRuntimeState();
 
-	function clearCliStatus(ctx: { readonly hasUI: boolean; readonly ui: { readonly setStatus: (key: string, text: string | undefined) => void } }): void {
+	function clearCliStatus(ctx: ExtensionContext): void {
 		if (ctx.hasUI) ctx.ui.setStatus(EXTENSION_NAME, undefined);
 	}
 
+	function formatManualStartOutcome(outcome: StartAsyncJobOutcome): string | undefined {
+		if (outcome === "started" || outcome === "ready_reused") return undefined;
+		const reasonByOutcome: Record<Exclude<StartAsyncJobOutcome, "started" | "ready_reused">, string> = {
+			already_pending: "job already pending",
+			disabled: "disabled",
+			model_missing: "model unavailable",
+			settings_disabled: "Pi compaction disabled",
+			context_unknown: "context usage unknown",
+			start_window_empty: "start window empty",
+			below_threshold: "below threshold",
+			above_force_threshold: "past compaction threshold",
+			nothing_to_compact: "nothing to compact",
+		};
+		return `async compaction not started: ${reasonByOutcome[outcome]}`;
+	}
+
 	function showStatus(ctx: ExtensionCommandContext): void {
+		const startRatio = getStartRatio();
+		const settings = ctx.model ? getCompactionSettings(ctx) : undefined;
+		const startWindow = settings ? formatStartWindow(getStartWindow(ctx.model?.contextWindow, startRatio, settings.reserveTokens)) : "unknown";
 		const statusText = formatRuntimeStatus(state, {
 			enabled: isEnabled(),
-			startRatio: getStartRatio(),
+			startRatio,
+			startWindow,
 			timeoutMs: getTimeoutMs(),
 		});
 		if (ctx.hasUI) {
@@ -28,7 +55,7 @@ export default function asyncPrefixCompaction(pi: ExtensionAPI) {
 	}
 
 	pi.on("turn_end", (_event, ctx) => {
-		startAsyncJob(ctx, state);
+		deps.startAsyncJob(ctx, state);
 	});
 
 	pi.on("model_select", (_event, ctx) => {
@@ -72,6 +99,7 @@ export default function asyncPrefixCompaction(pi: ExtensionAPI) {
 		state.status = "idle";
 		state.ready = undefined;
 		state.reason = undefined;
+		state.lastHandedOffJobId = ready.jobId;
 		clearCliStatus(ctx);
 		return { compaction: ready.result };
 	});
@@ -81,6 +109,7 @@ export default function asyncPrefixCompaction(pi: ExtensionAPI) {
 		if (!marker) return;
 
 		state.lastAppliedJobId = marker.jobId;
+		if (state.lastHandedOffJobId === marker.jobId) state.lastHandedOffJobId = undefined;
 		if (ctx.hasUI) {
 			const ui = ctx.ui;
 			setTimeout(() => ui.notify("Applied ready async prefix compaction", "info"), 0);
@@ -95,7 +124,9 @@ export default function asyncPrefixCompaction(pi: ExtensionAPI) {
 	pi.registerCommand("async-compact-now", {
 		description: "Start async prefix compaction now",
 		handler: async (_args, ctx) => {
-			startAsyncJob(ctx, state, { force: true });
+			const message = formatManualStartOutcome(deps.startAsyncJob(ctx, state, { force: true }));
+			if (message && ctx.hasUI) ctx.ui.notify(message, "info");
+			if (message && !ctx.hasUI) console.log(message);
 		},
 	});
 

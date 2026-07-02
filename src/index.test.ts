@@ -1,6 +1,9 @@
+import { readFileSync } from "node:fs";
 import { describe, expect, test } from "bun:test";
+import { createAssistantMessageEventStream } from "@earendil-works/pi-ai";
 import type { Api, Model } from "@earendil-works/pi-ai";
 import type { ExtensionAPI, ExtensionContext, SessionBeforeCompactEvent, SessionEntry, SessionMessageEntry } from "@earendil-works/pi-coding-agent";
+import { compact } from "@earendil-works/pi-coding-agent";
 // test-only parity sentinel: Pi does not publicly export prepareCompaction/estimateContextTokens.
 // if this private path breaks, update the sentinel or switch to a public export.
 import {
@@ -8,12 +11,15 @@ import {
 	prepareCompaction as preparePiCompaction,
 } from "../node_modules/@earendil-works/pi-coding-agent/dist/core/compaction/compaction.js";
 import { InvalidationReason } from "./constants";
+import asyncPrefixCompaction from "./index";
 import { startAsyncJobWithDeps } from "./job";
+import { prepareAsyncCompaction } from "./preparation";
 import { getAbortInvalidationReason, createRuntimeState, formatRuntimeStatus } from "./runtime-state";
-import asyncPrefixCompaction, { prepareAsyncCompaction, validateReadyJob } from "./index";
 import { estimateContextUsageTokens, getTimeoutMs, settingsKey } from "./utils";
+import { validateReadyJob } from "./validation";
 
 const timestamp = "2026-06-30T00:00:00.000Z";
+const explicitRealParityTest = process.env.PI_RUN_REAL_COMPACTION_PARITY === "1" ? test : test.skip;
 const settings = {
 	enabled: true,
 	reserveTokens: 100,
@@ -184,6 +190,29 @@ function asyncJobContext(entries: readonly SessionEntry[], usageTokens = 850, co
 	} as ExtensionContext;
 }
 
+function manualCommandEntries(): SessionEntry[] {
+	return [
+		userEntry("u1", null, "old prefix"),
+		assistantEntry("a1", "u1", "x".repeat(100_000), 30_000),
+		userEntry("u2", "a1", "raw tail starts here"),
+	];
+}
+
+function manualCommandContext(entries: readonly SessionEntry[] = manualCommandEntries()): ExtensionContext {
+	return {
+		...asyncJobContext(entries, 100),
+		hasUI: true,
+		ui: {
+			notify: () => undefined,
+			setStatus: () => undefined,
+		},
+		modelRegistry: {
+			getApiKeyAndHeaders: () => new Promise<never>(() => {}),
+		},
+		compact: () => undefined,
+	} as unknown as ExtensionContext;
+}
+
 function compactableEntries(): SessionEntry[] {
 	return [
 		userEntry("u1", null, "old prefix"),
@@ -210,7 +239,7 @@ function asyncJobDeps(overrides: Partial<Parameters<typeof startAsyncJobWithDeps
 	};
 }
 
-function extensionHarness(): {
+function extensionHarness(deps?: Parameters<typeof asyncPrefixCompaction>[1]): {
 	readonly handlers: Map<string, (event: unknown, ctx: ExtensionContext) => unknown>;
 	readonly commands: Map<string, { readonly handler: (args: string, ctx: ExtensionContext) => unknown }>;
 	readonly notifyMessages: string[];
@@ -241,7 +270,7 @@ function extensionHarness(): {
 		},
 	} as unknown as ExtensionContext;
 
-	asyncPrefixCompaction(pi);
+	asyncPrefixCompaction(pi, deps);
 
 	return { handlers, commands, notifyMessages, statusValues, ctx };
 }
@@ -307,6 +336,59 @@ function expectAsyncPreparationToMatchPi(
 	expect([...asyncPreparation.fileOps.written].sort()).toEqual([...piPreparation.fileOps.written].sort());
 	expect([...asyncPreparation.fileOps.edited].sort()).toEqual([...piPreparation.fileOps.edited].sort());
 }
+
+function textBlocksFromContent(content: unknown): string[] {
+	if (!Array.isArray(content)) return [];
+	return content.flatMap((block) => {
+		if (!block || typeof block !== "object" || Array.isArray(block)) return [];
+		const fields = block as Record<string, unknown>;
+		return fields.type === "text" && typeof fields.text === "string" ? [fields.text] : [];
+	});
+}
+
+function deterministicSummaryText(messages: readonly unknown[]): string {
+	const text = messages
+		.flatMap((message) => {
+			if (!message || typeof message !== "object" || Array.isArray(message)) return [];
+			return textBlocksFromContent((message as Record<string, unknown>).content);
+		})
+		.join("\n");
+	return `deterministic:${text.length}:${text.slice(0, 120)}`;
+}
+
+function realLongEdcEntries(): SessionEntry[] {
+	const fixtureUrl = new URL("../test-fixtures/edc-real-long-session.jsonl", import.meta.url);
+	return readFileSync(fixtureUrl, "utf8")
+		.split("\n")
+		.filter(Boolean)
+		.map((line) => JSON.parse(line) as unknown)
+		.filter((entry): entry is SessionEntry => {
+			if (!entry || typeof entry !== "object" || Array.isArray(entry)) return false;
+			return (entry as Record<string, unknown>).type !== "session";
+		});
+}
+
+const deterministicStreamFn: NonNullable<Parameters<typeof compact>[7]> = (_model, context) => {
+	const stream = createAssistantMessageEventStream();
+	stream.end({
+		role: "assistant",
+		content: [{ type: "text", text: deterministicSummaryText(context.messages) }],
+		api: "test-api",
+		provider: "test-provider",
+		model: "test-model",
+		usage: {
+			input: 0,
+			output: 0,
+			cacheRead: 0,
+			cacheWrite: 0,
+			totalTokens: 0,
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+		},
+		stopReason: "stop",
+		timestamp: Date.parse(timestamp),
+	});
+	return stream;
+};
 
 describe("prepareAsyncCompaction", () => {
 	test("inherits file operations from previous async compactions created by this extension", () => {
@@ -459,6 +541,29 @@ describe("Pi preparation parity sentinels", () => {
 
 		expect(estimateContextUsageTokens(messages)).toBe(estimatePiContextTokens(messages).tokens);
 	});
+
+	explicitRealParityTest("produces the same deterministic compaction result as Pi for a real long edc conversation", async () => {
+		const entries = realLongEdcEntries();
+		const contextWindow = 400_000;
+		const maxRecordedTokens = Math.max(
+			...entries.map((entry) =>
+				entry.type === "message" && entry.message.role === "assistant" ? (entry.message.usage?.totalTokens ?? 0) : 0,
+			),
+		);
+		expect(maxRecordedTokens).toBeGreaterThan(contextWindow / 2);
+
+		const compactionSettings = { ...settings, keepRecentTokens: 20_000 };
+		const asyncPreparation = prepareAsyncCompaction(entries, compactionSettings);
+		const piPreparation = preparePiCompaction([...entries], compactionSettings);
+		if (!asyncPreparation || !piPreparation) throw new Error("Expected both preparation paths to produce compaction input");
+
+		const [asyncResult, piResult] = await Promise.all([
+			compact(asyncPreparation, testModel(contextWindow), "test-key", {}, undefined, new AbortController().signal, "off", deterministicStreamFn),
+			compact(piPreparation, testModel(contextWindow), "test-key", {}, undefined, new AbortController().signal, "off", deterministicStreamFn),
+		]);
+
+		expect(asyncResult).toEqual(piResult);
+	});
 });
 
 describe("startAsyncJob lifecycle", () => {
@@ -494,15 +599,42 @@ describe("startAsyncJob lifecycle", () => {
 		const state = createRuntimeState();
 		const never = new Promise<never>(() => {});
 
-		startAsyncJobWithDeps(
+		const outcome = startAsyncJobWithDeps(
 			asyncJobContext(compactableEntries(), 100),
 			state,
 			asyncJobDeps({ buildAsyncCompactionResult: () => never }),
 			{ force: true },
 		);
 
+		expect(outcome).toBe("started");
 		expect(state.status).toBe("pending");
 		expect(state.jobId).toBe("async-prefix-compaction-1");
+	});
+
+	test("does not auto-start when reserve leaves no start window", () => {
+		const state = createRuntimeState();
+		let buildCalls = 0;
+
+		const outcome = startAsyncJobWithDeps(
+			asyncJobContext(compactableEntries(), 30_000, 32_000),
+			state,
+			asyncJobDeps({
+				buildAsyncCompactionResult: async (preparation) => {
+					buildCalls++;
+					return {
+						summary: "async summary",
+						firstKeptEntryId: preparation.firstKeptEntryId,
+						tokensBefore: preparation.tokensBefore,
+						details: { readFiles: [], modifiedFiles: [] },
+					};
+				},
+				getCompactionSettings: () => ({ ...settings, reserveTokens: 16_384 }),
+			}),
+		);
+
+		expect(outcome).toBe("start_window_empty");
+		expect(state.status).toBe("idle");
+		expect(buildCalls).toBe(0);
 	});
 
 	test("clears cli status line when a background job becomes ready", async () => {
@@ -571,6 +703,31 @@ describe("startAsyncJob lifecycle", () => {
 		expect(state.status).toBe("failed");
 		expect(state.reason).toBe(InvalidationReason.FAILED);
 		expect(state.error).toBe("apply failed: already compacted");
+	});
+
+	test("records apply failures after a ready job has been handed off", async () => {
+		const state = createRuntimeState();
+		let onApplyError: ((error: Error) => void) | undefined;
+
+		startAsyncJobWithDeps(
+			asyncJobContext(compactableEntries()),
+			state,
+			asyncJobDeps({ triggerCompaction: (_ctx, onError) => (onApplyError = onError) }),
+		);
+		await Promise.resolve();
+
+		expect(state.status).toBe("ready");
+		expect(state.jobId).toBe("async-prefix-compaction-1");
+		state.status = "idle";
+		state.ready = undefined;
+		state.reason = undefined;
+		state.lastHandedOffJobId = "async-prefix-compaction-1";
+
+		onApplyError?.(new Error("render failed"));
+
+		expect(String(state.status)).toBe("failed");
+		expect(String(state.reason)).toBe(InvalidationReason.FAILED);
+		expect(state.error).toBe("apply failed: render failed");
 	});
 
 	test("marks timeout aborts stale with a timeout reason", async () => {
@@ -684,14 +841,46 @@ describe("extension hooks", () => {
 		expect(commands.has("async-compact-status")).toBe(true);
 	});
 
-	test("manual trigger command does not write status text to chat", async () => {
+	test("manual trigger command does not write status text to chat when a job starts", async () => {
 		const { commands, notifyMessages, ctx } = extensionHarness();
 		const command = commands.get("async-compact-now");
 		if (!command) throw new Error("async-compact-now command was not registered");
 
-		await command.handler("", ctx);
+		await command.handler("", { ...manualCommandContext(), ui: ctx.ui } as ExtensionContext);
 
 		expect(notifyMessages).toEqual([]);
+	});
+
+	test("manual trigger reports when async compaction is disabled", async () => {
+		const previous = process.env.PI_ASYNC_PREFIX_COMPACTION;
+		process.env.PI_ASYNC_PREFIX_COMPACTION = "0";
+		try {
+			const { commands, notifyMessages, ctx } = extensionHarness();
+			const command = commands.get("async-compact-now");
+			if (!command) throw new Error("async-compact-now command was not registered");
+
+			await command.handler("", ctx);
+
+			expect(notifyMessages).toEqual(["async compaction not started: disabled"]);
+		} finally {
+			if (previous === undefined) {
+				delete process.env.PI_ASYNC_PREFIX_COMPACTION;
+			} else {
+				process.env.PI_ASYNC_PREFIX_COMPACTION = previous;
+			}
+		}
+	});
+
+	test("manual trigger reports when a job is already pending", async () => {
+		const { commands, notifyMessages, ctx } = extensionHarness();
+		const command = commands.get("async-compact-now");
+		if (!command) throw new Error("async-compact-now command was not registered");
+		const commandCtx = { ...manualCommandContext(), ui: ctx.ui } as ExtensionContext;
+
+		await command.handler("", commandCtx);
+		await command.handler("", commandCtx);
+
+		expect(notifyMessages).toEqual(["async compaction not started: job already pending"]);
 	});
 
 	test("does not claim compactions from other extensions", () => {
@@ -746,6 +935,49 @@ describe("extension hooks", () => {
 
 		expect(notifyMessages[0]).toContain("lastApplied: async-prefix-compaction-1");
 	});
+
+	test("records apply failures after session_before_compact hands off a ready job", async () => {
+		let onApplyError: ((error: Error) => void) | undefined;
+		const { handlers, commands, notifyMessages, ctx } = extensionHarness({
+			startAsyncJob: (jobCtx, state, options) =>
+				startAsyncJobWithDeps(
+					jobCtx,
+					state,
+					asyncJobDeps({ triggerCompaction: (_ctx, onError) => (onApplyError = onError) }),
+					options,
+				),
+		});
+		const turnEndHandler = handlers.get("turn_end");
+		const beforeCompactHandler = handlers.get("session_before_compact");
+		const statusCommand = commands.get("async-compact-status");
+		if (!turnEndHandler) throw new Error("turn_end handler was not registered");
+		if (!beforeCompactHandler) throw new Error("session_before_compact handler was not registered");
+		if (!statusCommand) throw new Error("async-compact-status command was not registered");
+
+		turnEndHandler({}, asyncJobContext(compactableEntries()));
+		await Promise.resolve();
+		const handoff = await beforeCompactHandler(validationEvent(), asyncJobContext(compactableEntries()));
+		onApplyError?.(new Error("render failed"));
+		await statusCommand.handler("", ctx);
+
+		expect(handoff).toEqual({
+			compaction: expect.objectContaining({ summary: "async summary" }),
+		});
+		expect(notifyMessages[0]).toContain("status: failed");
+		expect(notifyMessages[0]).toContain("error: apply failed: render failed");
+	});
+
+	test("status command reports an empty auto-start window for small context models", async () => {
+		const { commands, notifyMessages, ctx } = extensionHarness();
+		const statusCommand = commands.get("async-compact-status");
+		if (!statusCommand) throw new Error("async-compact-status command was not registered");
+
+		await statusCommand.handler("", { ...ctx, cwd: process.cwd(), model: testModel(32_000) } as ExtensionContext);
+
+		expect(notifyMessages[0]).toContain(
+			"startWindow: empty (contextWindow 32000, startRatio 0.8, reserveTokens 16384)",
+		);
+	});
 });
 
 describe("configuration helpers", () => {
@@ -776,10 +1008,12 @@ describe("runtime state helpers", () => {
 				abortController: undefined,
 				jobCounter: 1,
 				lastAppliedJobId: "async-prefix-compaction-1",
+				lastHandedOffJobId: undefined,
 			},
 			{
 				enabled: true,
 				startRatio: 0.75,
+				startWindow: "750..900",
 				timeoutMs: 1234,
 			},
 		);
@@ -787,6 +1021,7 @@ describe("runtime state helpers", () => {
 		expect(text).toContain("status: ready");
 		expect(text).toContain("lastApplied: async-prefix-compaction-1");
 		expect(text).toContain("reason: timeout");
+		expect(text).toContain("startWindow: 750..900");
 		expect(text).toContain("timeoutMs: 1234");
 	});
 

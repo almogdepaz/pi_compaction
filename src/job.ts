@@ -10,6 +10,7 @@ import { estimateAfterApply } from "./validation";
 import {
 	getCompactionSettings,
 	getStartRatio,
+	getStartWindow,
 	getThinkingLevel,
 	getTimeoutMs,
 	isEnabled,
@@ -18,6 +19,7 @@ import {
 } from "./utils";
 
 function shouldReplaceReadyJob(ready: ReadyJob, ctx: ExtensionContext, settings: ResolvedCompactionSettings): boolean {
+	// Keep session/model/thinking/settings checks aligned with validateReadyJob.
 	const currentPath = ctx.sessionManager.getBranch();
 	if (ctx.sessionManager.getLeafId() === ready.snapshotLeafId) {
 		return false;
@@ -78,6 +80,19 @@ export interface StartAsyncJobOptions {
 	readonly timeoutMs?: number;
 }
 
+export type StartAsyncJobOutcome =
+	| "started"
+	| "already_pending"
+	| "ready_reused"
+	| "disabled"
+	| "model_missing"
+	| "settings_disabled"
+	| "context_unknown"
+	| "start_window_empty"
+	| "below_threshold"
+	| "above_force_threshold"
+	| "nothing_to_compact";
+
 const defaultStartAsyncJobDependencies: StartAsyncJobDependencies = {
 	buildAsyncCompactionResult,
 	getCompactionSettings,
@@ -90,16 +105,23 @@ const defaultStartAsyncJobDependencies: StartAsyncJobDependencies = {
 	triggerCompaction: (ctx, onError) => ctx.compact({ onError }),
 };
 
-export function startAsyncJob(ctx: ExtensionContext, state: RuntimeState, options: StartAsyncJobOptions = { force: false, timeoutMs: undefined }): void {
-	startAsyncJobWithDeps(ctx, state, defaultStartAsyncJobDependencies, options);
+export function startAsyncJob(
+	ctx: ExtensionContext,
+	state: RuntimeState,
+	options: StartAsyncJobOptions = { force: false, timeoutMs: undefined },
+): StartAsyncJobOutcome {
+	return startAsyncJobWithDeps(ctx, state, defaultStartAsyncJobDependencies, options);
 }
 
 function recordApplyError(state: RuntimeState, jobId: string, error: Error): void {
-	if (state.status !== "ready" || state.jobId !== jobId) return;
+	const isReadyJob = state.status === "ready" && state.jobId === jobId;
+	const isHandedOffJob = state.status === "idle" && state.lastHandedOffJobId === jobId;
+	if (!isReadyJob && !isHandedOffJob) return;
 	state.status = "failed";
 	state.ready = undefined;
 	state.reason = InvalidationReason.FAILED;
 	state.error = `apply failed: ${error.message}`;
+	state.lastHandedOffJobId = undefined;
 }
 
 export function startAsyncJobWithDeps(
@@ -107,28 +129,32 @@ export function startAsyncJobWithDeps(
 	state: RuntimeState,
 	deps: StartAsyncJobDependencies,
 	options: StartAsyncJobOptions = { force: false, timeoutMs: undefined },
-): void {
-	if (!deps.isEnabled() || !ctx.model) return;
+): StartAsyncJobOutcome {
+	if (!deps.isEnabled()) return "disabled";
+	if (!ctx.model) return "model_missing";
 
 	const settings = deps.getCompactionSettings(ctx);
-	if (!settings.enabled) return;
+	if (!settings.enabled) return "settings_disabled";
 
 	if (!options.force) {
 		const usage = ctx.getContextUsage();
-		if (!usage || usage.tokens === null || usage.contextWindow <= 0) return;
+		if (!usage || usage.tokens === null || usage.contextWindow <= 0) return "context_unknown";
 
-		const startThreshold = Math.floor(usage.contextWindow * deps.getStartRatio());
-		const forceThreshold = usage.contextWindow - settings.reserveTokens;
-		if (usage.tokens <= startThreshold || usage.tokens > forceThreshold) return;
+		// Pi's shouldCompact checks the final trigger threshold; async starts earlier and must keep its own window.
+		const startWindow = getStartWindow(usage.contextWindow, deps.getStartRatio(), settings.reserveTokens);
+		if (startWindow.kind === "unknown") return "context_unknown";
+		if (startWindow.kind === "empty") return "start_window_empty";
+		if (usage.tokens <= startWindow.startThreshold) return "below_threshold";
+		if (usage.tokens > startWindow.forceThreshold) return "above_force_threshold";
 	}
 
-	if (state.status === "pending") return;
+	if (state.status === "pending") return "already_pending";
 	if (state.status === "ready" && state.ready && !shouldReplaceReadyJob(state.ready, ctx, settings)) {
 		if (options.force) {
 			const readyJobId = state.ready.jobId;
 			deps.triggerCompaction(ctx, (error) => recordApplyError(state, readyJobId, error));
 		}
-		return;
+		return "ready_reused";
 	}
 	if (state.status === "ready") {
 		markStale(state, InvalidationReason.SUPERSEDED);
@@ -136,10 +162,10 @@ export function startAsyncJobWithDeps(
 
 	const branch = ctx.sessionManager.getBranch();
 	const preparation = prepareAsyncCompaction(branch, settings);
-	if (!preparation) return;
+	if (!preparation) return "nothing_to_compact";
 
 	const snapshotLeafId = branch[branch.length - 1]?.id;
-	if (!snapshotLeafId) return;
+	if (!snapshotLeafId) return "nothing_to_compact";
 
 	const jobId = nextJobId(state);
 	state.abortController?.abort();
@@ -151,6 +177,7 @@ export function startAsyncJobWithDeps(
 	state.ready = undefined;
 	state.reason = undefined;
 	state.error = undefined;
+	state.lastHandedOffJobId = undefined;
 	deps.setCliStatus(ctx, "async_compaction ...");
 
 	const model = ctx.model;
@@ -232,4 +259,5 @@ export function startAsyncJobWithDeps(
 			state.error = error instanceof Error ? error.message : String(error);
 			deps.setCliStatus(ctx, undefined);
 		});
+	return "started";
 }

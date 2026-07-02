@@ -5,6 +5,22 @@ import { buildSessionContext, calculateContextTokens, estimateTokens, SettingsMa
 import { DEFAULT_START_RATIO, DEFAULT_TIMEOUT_MS, SUMMARY_PROMPT_VERSION } from "./constants";
 import type { AsyncCompactionDetails, ResolvedCompactionSettings } from "./types";
 
+export type StartWindow =
+	| {
+			readonly kind: "unknown";
+	  }
+	| {
+			readonly kind: "empty";
+			readonly contextWindow: number;
+			readonly startRatio: number;
+			readonly reserveTokens: number;
+	  }
+	| {
+			readonly kind: "available";
+			readonly startThreshold: number;
+			readonly forceThreshold: number;
+	  };
+
 function readNumberSetting(name: string, defaultValue: number): number {
 	const value = process.env[name];
 	if (!value) return defaultValue;
@@ -22,6 +38,24 @@ export function getTimeoutMs(): number {
 
 export function isEnabled(): boolean {
 	return process.env.PI_ASYNC_PREFIX_COMPACTION !== "0";
+}
+
+export function getStartWindow(contextWindow: number | undefined, startRatio: number, reserveTokens: number): StartWindow {
+	if (!contextWindow || contextWindow <= 0) return { kind: "unknown" };
+	const startThreshold = Math.floor(contextWindow * startRatio);
+	const forceThreshold = contextWindow - reserveTokens;
+	if (startThreshold >= forceThreshold) {
+		return { kind: "empty", contextWindow, startRatio, reserveTokens };
+	}
+	return { kind: "available", startThreshold, forceThreshold };
+}
+
+export function formatStartWindow(startWindow: StartWindow): string {
+	if (startWindow.kind === "unknown") return "unknown";
+	if (startWindow.kind === "empty") {
+		return `empty (contextWindow ${startWindow.contextWindow}, startRatio ${startWindow.startRatio}, reserveTokens ${startWindow.reserveTokens})`;
+	}
+	return `${startWindow.startThreshold}..${startWindow.forceThreshold}`;
 }
 
 export function modelKey(model: Model<Api>): string {
@@ -46,7 +80,7 @@ export function getAsyncCompactionMarker(value: unknown): AsyncCompactionDetails
 		typeof fields.jobId !== "string" ||
 		typeof fields.snapshotLeafId !== "string" ||
 		typeof fields.modelKey !== "string" ||
-		typeof fields.thinkingLevel !== "string" ||
+		!isThinkingLevel(fields.thinkingLevel) ||
 		typeof fields.settingsKey !== "string"
 	) {
 		return undefined;
@@ -55,7 +89,7 @@ export function getAsyncCompactionMarker(value: unknown): AsyncCompactionDetails
 		jobId: fields.jobId,
 		snapshotLeafId: fields.snapshotLeafId,
 		modelKey: fields.modelKey,
-		thinkingLevel: fields.thinkingLevel as AsyncCompactionDetails["asyncPrefixCompaction"]["thinkingLevel"],
+		thinkingLevel: fields.thinkingLevel,
 		settingsKey: fields.settingsKey,
 		promptVersion: fields.promptVersion,
 	};
@@ -74,8 +108,8 @@ export function getThinkingLevel(pathEntries: readonly SessionEntry[]): Thinking
 	return isThinkingLevel(thinkingLevel) ? thinkingLevel : "off";
 }
 
-function isThinkingLevel(value: string): value is ThinkingLevel {
-	return ["off", "minimal", "low", "medium", "high", "xhigh"].includes(value);
+export function isThinkingLevel(value: unknown): value is ThinkingLevel {
+	return typeof value === "string" && ["off", "minimal", "low", "medium", "high", "xhigh"].includes(value);
 }
 
 export function isToolResultEntry(entry: SessionEntry): boolean {

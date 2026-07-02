@@ -58,7 +58,7 @@ idle -> pending -> ready -> idle
               \-> stale | failed
 ```
 
-`/async-compact-status` reports status, job id, last applied job id, last stale/failure reason, error, enabled flag, start ratio, and timeout. `/async-compact-now` starts a background job immediately, bypassing the early-start threshold while still respecting the enabled/model/settings/preparation guards.
+`/async-compact-status` reports status, job id, last applied job id, last stale/failure reason, error, enabled flag, start ratio, auto-start window, and timeout. `/async-compact-now` starts a background job immediately, bypassing the early-start threshold while still respecting the enabled/model/settings/preparation guards.
 
 Pi reports context usage as unknown after compaction until a later assistant response provides fresh usage. Use `lastApplied` in this extension's status output to confirm whether Pi persisted an async compaction.
 
@@ -121,13 +121,12 @@ Before returning a ready result, the extension validates:
 3. active model matches
 4. thinking level matches
 5. compaction settings match
-6. prompt version matches
-7. result `firstKeptEntryId` still matches the snapshotted `firstKeptEntryId`
-8. current branch contains `firstKeptEntryId`
-9. `firstKeptEntryId` is not a `toolResult`
-10. current branch contains `snapshotLeafId`
-11. `firstKeptEntryId` appears before or at `snapshotLeafId`
-12. previewed post-apply context fits under `contextWindow - event.preparation.settings.reserveTokens`
+6. result `firstKeptEntryId` still matches the snapshotted `firstKeptEntryId`
+7. current branch contains `firstKeptEntryId`
+8. `firstKeptEntryId` is not a `toolResult`
+9. current branch contains `snapshotLeafId`
+10. `firstKeptEntryId` appears before or at `snapshotLeafId`
+11. previewed post-apply context fits under `contextWindow - event.preparation.settings.reserveTokens`
 
 If any check fails, the job becomes stale and Pi falls back to synchronous compaction.
 
@@ -165,7 +164,6 @@ Possible reasons:
 Environment variables:
 
 ```bash
-PI_ASYNC_PREFIX_COMPACTION=1
 PI_ASYNC_PREFIX_COMPACTION_START_RATIO=0.8
 PI_ASYNC_PREFIX_COMPACTION_TIMEOUT_MS=300000
 ```
@@ -182,13 +180,14 @@ Pi compaction settings remain the source of truth for reserve and keep-recent to
 }
 ```
 
-`PI_ASYNC_PREFIX_COMPACTION=0` disables the extension behavior. `TIMEOUT_MS=0` disables the timeout.
+The extension is enabled by default; `PI_ASYNC_PREFIX_COMPACTION=0` disables it. `TIMEOUT_MS=0` disables the timeout.
 
 ## limitations
 
 - In-memory only: pending/ready summaries do not survive process restart or `/reload`.
 - One job only: pending jobs block new jobs until applied, failed, or staled.
 - Preparation mirrors Pi's internal `prepareCompaction()` because it is not exported yet; this should be replaced with the real exported function if Pi exposes it.
+- Automatic start requires a non-empty token window: `floor(contextWindow * START_RATIO) < tokens <= contextWindow - reserveTokens`.
 - No metrics export beyond `/async-compact-status`.
 - `customInstructions` forces fallback to normal compaction.
 

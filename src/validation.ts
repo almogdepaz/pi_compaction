@@ -1,6 +1,6 @@
 import type { ExtensionContext, SessionBeforeCompactEvent, SessionEntry } from "@earendil-works/pi-coding-agent";
 import { buildSessionContext } from "@earendil-works/pi-coding-agent";
-import { InvalidationReason, SUMMARY_PROMPT_VERSION } from "./constants";
+import { InvalidationReason } from "./constants";
 import type { ReadyJob } from "./types";
 import { estimateMessagesTokens, getThinkingLevel, isToolResultEntry, modelKey, settingsKey } from "./utils";
 
@@ -30,14 +30,12 @@ export function validateReadyJob(
 	if (event.customInstructions?.trim()) {
 		return InvalidationReason.CUSTOM_INSTRUCTIONS;
 	}
+	// Keep session/model/thinking/settings checks aligned with shouldReplaceReadyJob.
 	if (job.sessionId !== ctx.sessionManager.getSessionId()) {
 		return InvalidationReason.SESSION_CHANGED;
 	}
 	if (!ctx.model || job.modelKey !== modelKey(ctx.model)) {
 		return InvalidationReason.MODEL_CHANGED;
-	}
-	if (job.promptVersion !== SUMMARY_PROMPT_VERSION) {
-		return InvalidationReason.FAILED;
 	}
 	if (job.settingsKey !== settingsKey(event.preparation.settings)) {
 		return InvalidationReason.SETTINGS_CHANGED;

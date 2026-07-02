@@ -48,7 +48,7 @@ Status:
 /async-compact-status
 ```
 
-After an async compaction is persisted, status includes `lastApplied: <job-id>`. Pi may show unknown context usage (`?`) after compaction until the next assistant response; that does not by itself mean the compaction failed.
+After an async compaction is persisted, status includes `lastApplied: <job-id>`. Status also reports the auto-start token window; `startWindow: empty (...)` means the configured reserve leaves no valid automatic start range for the active model context window. Pi may show unknown context usage (`?`) after compaction until the next assistant response; that does not by itself mean the compaction failed.
 
 Manual trigger, bypassing the early-start threshold:
 
@@ -59,12 +59,11 @@ Manual trigger, bypassing the early-start threshold:
 ## env config
 
 ```bash
-PI_ASYNC_PREFIX_COMPACTION=1
 PI_ASYNC_PREFIX_COMPACTION_START_RATIO=0.8
 PI_ASYNC_PREFIX_COMPACTION_TIMEOUT_MS=300000
 ```
 
-Reserve and keep-recent tokens come from Pi's normal `compaction` settings. Set `PI_ASYNC_PREFIX_COMPACTION=0` to disable.
+The extension is enabled by default; set `PI_ASYNC_PREFIX_COMPACTION=0` to disable. Reserve and keep-recent tokens come from Pi's normal `compaction` settings. Automatic background jobs only start when `floor(contextWindow * START_RATIO) < tokens <= contextWindow - reserveTokens`; if that window is empty, use a larger context model, lower the start ratio, or lower Pi's reserve tokens.
 
 ## development
 

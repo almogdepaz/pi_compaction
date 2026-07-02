@@ -4,6 +4,7 @@ import type { RuntimeState } from "./types";
 export interface RuntimeStatusOptions {
 	readonly enabled: boolean;
 	readonly startRatio: number;
+	readonly startWindow: string;
 	readonly timeoutMs: number;
 }
 
@@ -17,6 +18,7 @@ export function createRuntimeState(): RuntimeState {
 		abortController: undefined,
 		jobCounter: 0,
 		lastAppliedJobId: undefined,
+		lastHandedOffJobId: undefined,
 	};
 }
 
@@ -31,6 +33,7 @@ export function markStale(state: RuntimeState, reason: InvalidationReason): void
 	state.status = "stale";
 	state.ready = undefined;
 	state.reason = reason;
+	state.lastHandedOffJobId = undefined;
 }
 
 export function getAbortInvalidationReason(timedOut: boolean): InvalidationReason {
@@ -46,6 +49,7 @@ export function formatRuntimeStatus(state: RuntimeState, options: RuntimeStatusO
 		`error: ${state.error ?? "none"}`,
 		`enabled: ${options.enabled}`,
 		`startRatio: ${options.startRatio}`,
+		`startWindow: ${options.startWindow}`,
 		`timeoutMs: ${options.timeoutMs}`,
 	].join("\n");
 }
