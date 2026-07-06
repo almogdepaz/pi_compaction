@@ -2,7 +2,7 @@ import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import type { SessionEntry } from "@earendil-works/pi-coding-agent";
 import { buildSessionContext, findCutPoint, getLatestCompactionEntry } from "@earendil-works/pi-coding-agent";
 import type { FileOperations, LocalCompactionPreparation, ResolvedCompactionSettings } from "./types";
-import { estimateContextUsageTokens, getStringArrayProperty, hasAsyncCompactionMarker } from "./utils";
+import { estimateContextUsageTokens, getAsyncCompactionMarker, getStringArrayProperty } from "./utils";
 
 function createFileOps(): FileOperations {
 	return {
@@ -103,7 +103,7 @@ export function prepareAsyncCompaction(
 
 	const fileOps = createFileOps();
 	const shouldInheritCompactionDetails =
-		latestCompaction && (!latestCompaction.fromHook || hasAsyncCompactionMarker(latestCompaction.details));
+		latestCompaction && (!latestCompaction.fromHook || getAsyncCompactionMarker(latestCompaction.details));
 	if (shouldInheritCompactionDetails) {
 		for (const file of getStringArrayProperty(latestCompaction.details, "readFiles")) {
 			fileOps.read.add(file);

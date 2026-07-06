@@ -1,13 +1,6 @@
 import { EXTENSION_NAME, InvalidationReason } from "./constants";
 import type { RuntimeState } from "./types";
 
-export interface RuntimeStatusOptions {
-	readonly enabled: boolean;
-	readonly startRatio: number;
-	readonly startWindow: string;
-	readonly timeoutMs: number;
-}
-
 export function createRuntimeState(): RuntimeState {
 	return {
 		status: "idle",
@@ -38,18 +31,4 @@ export function markStale(state: RuntimeState, reason: InvalidationReason): void
 
 export function getAbortInvalidationReason(timedOut: boolean): InvalidationReason {
 	return timedOut ? InvalidationReason.TIMEOUT : InvalidationReason.CANCELLED;
-}
-
-export function formatRuntimeStatus(state: RuntimeState, options: RuntimeStatusOptions): string {
-	return [
-		`status: ${state.status}`,
-		`job: ${state.jobId ?? "none"}`,
-		`lastApplied: ${state.lastAppliedJobId ?? "none"}`,
-		`reason: ${state.reason ?? "none"}`,
-		`error: ${state.error ?? "none"}`,
-		`enabled: ${options.enabled}`,
-		`startRatio: ${options.startRatio}`,
-		`startWindow: ${options.startWindow}`,
-		`timeoutMs: ${options.timeoutMs}`,
-	].join("\n");
 }

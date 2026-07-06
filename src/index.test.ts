@@ -14,7 +14,7 @@ import { InvalidationReason } from "./constants";
 import asyncPrefixCompaction from "./index";
 import { startAsyncJobWithDeps } from "./job";
 import { prepareAsyncCompaction } from "./preparation";
-import { getAbortInvalidationReason, createRuntimeState, formatRuntimeStatus } from "./runtime-state";
+import { getAbortInvalidationReason, createRuntimeState } from "./runtime-state";
 import { estimateContextUsageTokens, getTimeoutMs, settingsKey } from "./utils";
 import { validateReadyJob } from "./validation";
 
@@ -244,6 +244,7 @@ function extensionHarness(deps?: Parameters<typeof asyncPrefixCompaction>[1]): {
 	readonly commands: Map<string, { readonly handler: (args: string, ctx: ExtensionContext) => unknown }>;
 	readonly notifyMessages: string[];
 	readonly statusValues: Array<string | undefined>;
+	readonly toolExpansionValues: boolean[];
 	readonly ctx: ExtensionContext;
 } {
 	const handlers = new Map<string, (event: unknown, ctx: ExtensionContext) => unknown>();
@@ -258,6 +259,7 @@ function extensionHarness(deps?: Parameters<typeof asyncPrefixCompaction>[1]): {
 	} as unknown as ExtensionAPI;
 	const notifyMessages: string[] = [];
 	const statusValues: Array<string | undefined> = [];
+	const toolExpansionValues: boolean[] = [];
 	const ctx = {
 		hasUI: true,
 		ui: {
@@ -267,12 +269,15 @@ function extensionHarness(deps?: Parameters<typeof asyncPrefixCompaction>[1]): {
 			setStatus: (_key: string, text: string | undefined) => {
 				statusValues.push(text);
 			},
+			setToolsExpanded: (expanded: boolean) => {
+				toolExpansionValues.push(expanded);
+			},
 		},
 	} as unknown as ExtensionContext;
 
 	asyncPrefixCompaction(pi, deps);
 
-	return { handlers, commands, notifyMessages, statusValues, ctx };
+	return { handlers, commands, notifyMessages, statusValues, toolExpansionValues, ctx };
 }
 
 function readyJob(overrides: Partial<Parameters<typeof validateReadyJob>[0]> = {}): Parameters<typeof validateReadyJob>[0] {
@@ -779,6 +784,27 @@ describe("startAsyncJob lifecycle", () => {
 		expect(state.reason).toBe(InvalidationReason.TIMEOUT);
 	});
 
+	test("timeout clears pending state even when background compaction never settles", async () => {
+		const state = createRuntimeState();
+		const statusValues: Array<string | undefined> = [];
+		const never = new Promise<CompactionResult>(() => {});
+
+		startAsyncJobWithDeps(
+			asyncJobContext(compactableEntries()),
+			state,
+			asyncJobDeps({
+				getTimeoutMs: () => 1,
+				setCliStatus: (_ctx, text) => statusValues.push(text),
+				buildAsyncCompactionResult: () => never,
+			}),
+		);
+		await new Promise((resolve) => setTimeout(resolve, 5));
+
+		expect(state.status).toBe("stale");
+		expect(state.reason).toBe(InvalidationReason.TIMEOUT);
+		expect(statusValues).toEqual(["async_compaction ...", undefined]);
+	});
+
 	test("records background compaction failures", async () => {
 		const state = createRuntimeState();
 
@@ -792,6 +818,50 @@ describe("startAsyncJob lifecycle", () => {
 		expect(state.status).toBe("failed");
 		expect(state.reason).toBe(InvalidationReason.FAILED);
 		expect(state.error).toBe("auth failed");
+	});
+
+	test("records empty background compaction summaries as actionable failures", async () => {
+		const state = createRuntimeState();
+
+		startAsyncJobWithDeps(
+			asyncJobContext(compactableEntries()),
+			state,
+			asyncJobDeps({
+				buildAsyncCompactionResult: async (preparation) => ({
+					summary: "  \n\t  ",
+					firstKeptEntryId: preparation.firstKeptEntryId,
+					tokensBefore: preparation.tokensBefore,
+				}),
+			}),
+		);
+		await new Promise((resolve) => setTimeout(resolve, 0));
+
+		expect(state.status).toBe("failed");
+		expect(state.reason).toBe(InvalidationReason.FAILED);
+		expect(state.error).toBe("empty compaction summary");
+	});
+
+	test("replaces an unchanged-leaf ready job when settings drift", () => {
+		const state = createRuntimeState();
+		state.status = "ready";
+		state.jobId = "async-prefix-compaction-1";
+		state.jobCounter = 1;
+		state.ready = readyJob({ snapshotLeafId: "u2" });
+		const changedSettings = { ...settings, reserveTokens: 101 };
+		const never = new Promise<CompactionResult>(() => {});
+
+		const outcome = startAsyncJobWithDeps(
+			asyncJobContext(compactableEntries()),
+			state,
+			asyncJobDeps({
+				getCompactionSettings: () => changedSettings,
+				buildAsyncCompactionResult: () => never,
+			}),
+		);
+
+		expect(outcome).toBe("started");
+		expect(String(state.status)).toBe("pending");
+		expect(state.jobId).toBe("async-prefix-compaction-2");
 	});
 
 	test("replaces a ready job when appended tail makes it too large", () => {
@@ -842,11 +912,11 @@ describe("startAsyncJob lifecycle", () => {
 });
 
 describe("extension hooks", () => {
-	test("registers manual and status commands", () => {
+	test("registers the manual command without a separate status command", () => {
 		const { commands } = extensionHarness();
 
 		expect(commands.has("async-compact-now")).toBe(true);
-		expect(commands.has("async-compact-status")).toBe(true);
+		expect(commands.has("async-compact-status")).toBe(false);
 	});
 
 	test("manual trigger command does not write status text to chat when a job starts", async () => {
@@ -925,54 +995,27 @@ describe("extension hooks", () => {
 		expect(notifyMessages).toEqual(["Applied ready async prefix compaction"]);
 	});
 
-	test("status command reports the last applied async compaction", async () => {
-		const { handlers, commands, notifyMessages, ctx } = extensionHarness();
-		const compactHandler = handlers.get("session_compact");
-		const statusCommand = commands.get("async-compact-status");
-		if (!compactHandler) throw new Error("session_compact handler was not registered");
-		if (!statusCommand) throw new Error("async-compact-status command was not registered");
-
-		compactHandler(
-			{
-				fromExtension: true,
-				compactionEntry: { details: ownAsyncMarker() },
-			},
-			ctx,
-		);
-		await statusCommand.handler("", ctx);
-
-		expect(notifyMessages[0]).toContain("lastApplied: async-prefix-compaction-1");
-	});
-
-	test("records apply failures after session_before_compact hands off a ready job", async () => {
-		let onApplyError: ((error: Error) => void) | undefined;
-		const { handlers, commands, notifyMessages, ctx } = extensionHarness({
-			startAsyncJob: (jobCtx, state, options) =>
-				startAsyncJobWithDeps(
-					jobCtx,
-					state,
-					asyncJobDeps({ triggerCompaction: (_ctx, onError) => (onApplyError = onError) }),
-					options,
-				),
+	test("collapses Pi compaction summary before handing off a ready job", async () => {
+		const { handlers, toolExpansionValues, ctx } = extensionHarness({
+			startAsyncJob: (jobCtx, state, options) => startAsyncJobWithDeps(jobCtx, state, asyncJobDeps(), options),
 		});
 		const turnEndHandler = handlers.get("turn_end");
 		const beforeCompactHandler = handlers.get("session_before_compact");
-		const statusCommand = commands.get("async-compact-status");
 		if (!turnEndHandler) throw new Error("turn_end handler was not registered");
 		if (!beforeCompactHandler) throw new Error("session_before_compact handler was not registered");
-		if (!statusCommand) throw new Error("async-compact-status command was not registered");
 
-		turnEndHandler({}, asyncJobContext(compactableEntries()));
+		const entries = compactableEntries();
+		turnEndHandler({}, asyncJobContext(entries));
 		await Promise.resolve();
-		const handoff = await beforeCompactHandler(validationEvent(), asyncJobContext(compactableEntries()));
-		onApplyError?.(new Error("render failed"));
-		await statusCommand.handler("", ctx);
 
-		expect(handoff).toEqual({
-			compaction: expect.objectContaining({ summary: "async summary" }),
-		});
-		expect(notifyMessages[0]).toContain("status: failed");
-		expect(notifyMessages[0]).toContain("error: apply failed: render failed");
+		const handoff = await beforeCompactHandler(validationEvent(), {
+			...asyncJobContext(entries),
+			hasUI: true,
+			ui: ctx.ui,
+		} as ExtensionContext);
+
+		expect(handoff).toEqual({ compaction: expect.objectContaining({ summary: "async summary" }) });
+		expect(toolExpansionValues).toEqual([false]);
 	});
 
 	test("hands off compaction that lets Pi rebuild context without gaps through appended tail", async () => {
@@ -1023,17 +1066,6 @@ describe("extension hooks", () => {
 		]);
 	});
 
-	test("status command reports an empty auto-start window for small context models", async () => {
-		const { commands, notifyMessages, ctx } = extensionHarness();
-		const statusCommand = commands.get("async-compact-status");
-		if (!statusCommand) throw new Error("async-compact-status command was not registered");
-
-		await statusCommand.handler("", { ...ctx, cwd: process.cwd(), model: testModel(32_000) } as ExtensionContext);
-
-		expect(notifyMessages[0]).toContain(
-			"startWindow: empty (contextWindow 32000, startRatio 0.8, reserveTokens 16384)",
-		);
-	});
 });
 
 describe("configuration helpers", () => {
@@ -1053,34 +1085,6 @@ describe("configuration helpers", () => {
 });
 
 describe("runtime state helpers", () => {
-	test("formats status text for non-ui command output", () => {
-		const text = formatRuntimeStatus(
-			{
-				status: "ready",
-				jobId: "async-prefix-compaction-1",
-				ready: undefined,
-				reason: InvalidationReason.TIMEOUT,
-				error: "slow model",
-				abortController: undefined,
-				jobCounter: 1,
-				lastAppliedJobId: "async-prefix-compaction-1",
-				lastHandedOffJobId: undefined,
-			},
-			{
-				enabled: true,
-				startRatio: 0.75,
-				startWindow: "750..900",
-				timeoutMs: 1234,
-			},
-		);
-
-		expect(text).toContain("status: ready");
-		expect(text).toContain("lastApplied: async-prefix-compaction-1");
-		expect(text).toContain("reason: timeout");
-		expect(text).toContain("startWindow: 750..900");
-		expect(text).toContain("timeoutMs: 1234");
-	});
-
 	test("reports timeout aborts distinctly from lifecycle cancellation", () => {
 		expect(getAbortInvalidationReason(true)).toBe(InvalidationReason.TIMEOUT);
 		expect(getAbortInvalidationReason(false)).toBe(InvalidationReason.CANCELLED);

@@ -5,7 +5,7 @@ import { buildSessionContext, calculateContextTokens, estimateTokens, SettingsMa
 import { DEFAULT_START_RATIO, DEFAULT_TIMEOUT_MS, SUMMARY_PROMPT_VERSION } from "./constants";
 import type { AsyncCompactionDetails, ResolvedCompactionSettings } from "./types";
 
-export type StartWindow =
+type StartWindow =
 	| {
 			readonly kind: "unknown";
 	  }
@@ -50,14 +50,6 @@ export function getStartWindow(contextWindow: number | undefined, startRatio: nu
 	return { kind: "available", startThreshold, forceThreshold };
 }
 
-export function formatStartWindow(startWindow: StartWindow): string {
-	if (startWindow.kind === "unknown") return "unknown";
-	if (startWindow.kind === "empty") {
-		return `empty (contextWindow ${startWindow.contextWindow}, startRatio ${startWindow.startRatio}, reserveTokens ${startWindow.reserveTokens})`;
-	}
-	return `${startWindow.startThreshold}..${startWindow.forceThreshold}`;
-}
-
 export function modelKey(model: Model<Api>): string {
 	return `${model.provider}/${model.id}`;
 }
@@ -95,10 +87,6 @@ export function getAsyncCompactionMarker(value: unknown): AsyncCompactionDetails
 	};
 }
 
-export function hasAsyncCompactionMarker(value: unknown): boolean {
-	return getAsyncCompactionMarker(value) !== undefined;
-}
-
 export function getCompactionSettings(ctx: ExtensionContext): ResolvedCompactionSettings {
 	return SettingsManager.create(ctx.cwd).getCompactionSettings();
 }
@@ -108,7 +96,7 @@ export function getThinkingLevel(pathEntries: readonly SessionEntry[]): Thinking
 	return isThinkingLevel(thinkingLevel) ? thinkingLevel : "off";
 }
 
-export function isThinkingLevel(value: unknown): value is ThinkingLevel {
+function isThinkingLevel(value: unknown): value is ThinkingLevel {
 	return typeof value === "string" && ["off", "minimal", "low", "medium", "high", "xhigh"].includes(value);
 }
 

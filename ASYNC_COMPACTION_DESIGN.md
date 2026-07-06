@@ -58,9 +58,9 @@ idle -> pending -> ready -> idle
               \-> stale | failed
 ```
 
-`/async-compact-status` reports status, job id, last applied job id, last stale/failure reason, error, enabled flag, start ratio, auto-start window, and timeout. `/async-compact-now` starts a background job immediately, bypassing the early-start threshold while still respecting the enabled/model/settings/preparation guards.
+`/async-compact-now` starts a background job immediately, bypassing the early-start threshold while still respecting the enabled/model/settings/preparation guards. Pending background work is shown through Pi's CLI status line.
 
-Pi reports context usage as unknown after compaction until a later assistant response provides fresh usage. Use `lastApplied` in this extension's status output to confirm whether Pi persisted an async compaction.
+Pi reports context usage as unknown after compaction until a later assistant response provides fresh usage.
 
 No pending/ready metadata is persisted. Only an applied compaction is persisted by Pi as a normal `CompactionEntry`.
 
@@ -188,7 +188,7 @@ The extension is enabled by default; `PI_ASYNC_PREFIX_COMPACTION=0` disables it.
 - One job only: pending jobs block new jobs until applied, failed, or staled.
 - Preparation mirrors Pi's internal `prepareCompaction()` because it is not exported yet; this should be replaced with the real exported function if Pi exposes it.
 - Automatic start requires a non-empty token window: `floor(contextWindow * START_RATIO) < tokens <= contextWindow - reserveTokens`.
-- No metrics export beyond `/async-compact-status`.
+- No metrics export or separate status command.
 - `customInstructions` forces fallback to normal compaction.
 
 ## installation and test commands
@@ -203,12 +203,6 @@ One-off run:
 
 ```bash
 pi -e .
-```
-
-Status in Pi:
-
-```text
-/async-compact-status
 ```
 
 Manual async start:

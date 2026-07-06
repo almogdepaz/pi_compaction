@@ -21,9 +21,6 @@ import {
 function shouldReplaceReadyJob(ready: ReadyJob, ctx: ExtensionContext, settings: ResolvedCompactionSettings): boolean {
 	// Keep session/model/thinking/settings checks aligned with validateReadyJob.
 	const currentPath = ctx.sessionManager.getBranch();
-	if (ctx.sessionManager.getLeafId() === ready.snapshotLeafId) {
-		return false;
-	}
 	if (ready.sessionId !== ctx.sessionManager.getSessionId()) {
 		return true;
 	}
@@ -35,6 +32,9 @@ function shouldReplaceReadyJob(ready: ReadyJob, ctx: ExtensionContext, settings:
 	}
 	if (ready.settingsKey !== settingsKey(settings)) {
 		return true;
+	}
+	if (ctx.sessionManager.getLeafId() === ready.snapshotLeafId) {
+		return false;
 	}
 
 	const maxAfter = (ctx.model.contextWindow ?? 0) - settings.reserveTokens;
@@ -59,7 +59,7 @@ async function buildAsyncCompactionResult(
 	return compact(preparation, model, auth.apiKey, auth.headers, undefined, signal, thinkingLevel);
 }
 
-export interface StartAsyncJobDependencies {
+interface StartAsyncJobDependencies {
 	readonly buildAsyncCompactionResult: (
 		preparation: LocalCompactionPreparation,
 		model: Model<Api>,
@@ -75,7 +75,7 @@ export interface StartAsyncJobDependencies {
 	readonly triggerCompaction: (ctx: ExtensionContext, onError: (error: Error) => void) => void;
 }
 
-export interface StartAsyncJobOptions {
+interface StartAsyncJobOptions {
 	readonly force: boolean;
 	readonly timeoutMs?: number;
 }
@@ -200,6 +200,9 @@ export function startAsyncJobWithDeps(
 			? setTimeout(() => {
 				timedOut = true;
 				abortController.abort();
+				if (state.status !== "pending" || state.jobId !== jobId) return;
+				markStale(state, InvalidationReason.TIMEOUT);
+				deps.setCliStatus(ctx, undefined);
 			}, timeoutMs)
 			: undefined;
 
@@ -213,7 +216,11 @@ export function startAsyncJobWithDeps(
 				return;
 			}
 			if (!result.summary.trim()) {
-				markStale(state, InvalidationReason.FAILED);
+				state.abortController = undefined;
+				state.status = "failed";
+				state.ready = undefined;
+				state.reason = InvalidationReason.FAILED;
+				state.error = "empty compaction summary";
 				deps.setCliStatus(ctx, undefined);
 				return;
 			}

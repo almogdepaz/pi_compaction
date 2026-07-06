@@ -1,9 +1,9 @@
-import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { EXTENSION_NAME, InvalidationReason } from "./constants";
 import { startAsyncJob } from "./job";
 import type { StartAsyncJobOutcome } from "./job";
-import { createRuntimeState, formatRuntimeStatus, markStale } from "./runtime-state";
-import { formatStartWindow, getAsyncCompactionMarker, getCompactionSettings, getStartRatio, getStartWindow, getTimeoutMs, isEnabled } from "./utils";
+import { createRuntimeState, markStale } from "./runtime-state";
+import { getAsyncCompactionMarker } from "./utils";
 import { validateReadyJob } from "./validation";
 
 interface AsyncPrefixCompactionDependencies {
@@ -37,21 +37,9 @@ export default function asyncPrefixCompaction(pi: ExtensionAPI, deps: AsyncPrefi
 		return `async compaction not started: ${reasonByOutcome[outcome]}`;
 	}
 
-	function showStatus(ctx: ExtensionCommandContext): void {
-		const startRatio = getStartRatio();
-		const settings = ctx.model ? getCompactionSettings(ctx) : undefined;
-		const startWindow = settings ? formatStartWindow(getStartWindow(ctx.model?.contextWindow, startRatio, settings.reserveTokens)) : "unknown";
-		const statusText = formatRuntimeStatus(state, {
-			enabled: isEnabled(),
-			startRatio,
-			startWindow,
-			timeoutMs: getTimeoutMs(),
-		});
-		if (ctx.hasUI) {
-			ctx.ui.notify(statusText, "info");
-		} else {
-			console.log(statusText);
-		}
+	function collapseCompactionRender(ctx: ExtensionContext): void {
+		// Pi renders compaction summaries with the global tool-output expansion state.
+		if (ctx.hasUI) ctx.ui.setToolsExpanded(false);
 	}
 
 	pi.on("turn_end", (_event, ctx) => {
@@ -101,6 +89,7 @@ export default function asyncPrefixCompaction(pi: ExtensionAPI, deps: AsyncPrefi
 		state.reason = undefined;
 		state.lastHandedOffJobId = ready.jobId;
 		clearCliStatus(ctx);
+		collapseCompactionRender(ctx);
 		return { compaction: ready.result };
 	});
 
@@ -127,13 +116,6 @@ export default function asyncPrefixCompaction(pi: ExtensionAPI, deps: AsyncPrefi
 			const message = formatManualStartOutcome(deps.startAsyncJob(ctx, state, { force: true }));
 			if (message && ctx.hasUI) ctx.ui.notify(message, "info");
 			if (message && !ctx.hasUI) console.log(message);
-		},
-	});
-
-	pi.registerCommand("async-compact-status", {
-		description: "Show async prefix compaction status",
-		handler: async (_args, ctx) => {
-			showStatus(ctx);
 		},
 	});
 }

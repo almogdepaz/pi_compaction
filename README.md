@@ -42,14 +42,6 @@ Manual `/compact` still works and can also use a ready async summary.
 
 While a background summary is running, Pi's status bar shows `async_compaction ...`. The extension clears that status when the background job finishes, fails, or is invalidated, so the normal CLI returns while idle.
 
-Status:
-
-```text
-/async-compact-status
-```
-
-After an async compaction is persisted, status includes `lastApplied: <job-id>`. Status also reports the auto-start token window; `startWindow: empty (...)` means the configured reserve leaves no valid automatic start range for the active model context window. Pi may show unknown context usage (`?`) after compaction until the next assistant response; that does not by itself mean the compaction failed.
-
 Manual trigger, bypassing the early-start threshold:
 
 ```text
