@@ -97,7 +97,6 @@ export default function asyncPrefixCompaction(pi: ExtensionAPI, deps: AsyncPrefi
 		const marker = event.fromExtension ? getAsyncCompactionMarker(event.compactionEntry.details) : undefined;
 		if (!marker) return;
 
-		state.lastAppliedJobId = marker.jobId;
 		if (state.lastHandedOffJobId === marker.jobId) state.lastHandedOffJobId = undefined;
 		if (ctx.hasUI) {
 			const ui = ctx.ui;

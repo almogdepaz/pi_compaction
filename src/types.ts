@@ -58,6 +58,5 @@ export interface RuntimeState {
 	error: string | undefined;
 	abortController: AbortController | undefined;
 	jobCounter: number;
-	lastAppliedJobId: string | undefined;
 	lastHandedOffJobId: string | undefined;
 }

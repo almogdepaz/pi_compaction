@@ -10,7 +10,6 @@ export function createRuntimeState(): RuntimeState {
 		error: undefined,
 		abortController: undefined,
 		jobCounter: 0,
-		lastAppliedJobId: undefined,
 		lastHandedOffJobId: undefined,
 	};
 }
