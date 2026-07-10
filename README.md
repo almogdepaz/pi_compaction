@@ -1,4 +1,4 @@
-# pi async prefix compaction
+# pi async compaction
 
 Pi extension that precomputes compaction summaries in the background, then applies a ready summary through Pi's normal compaction flow when the agent is idle or when Pi triggers `/compact`/auto-compaction.
 
@@ -7,13 +7,13 @@ Pi extension that precomputes compaction summaries in the background, then appli
 From npm:
 
 ```bash
-pi install npm:pi-async-prefix-compaction
+pi install npm:pi-async-compaction
 ```
 
 From git:
 
 ```bash
-pi install git:github.com/almogdepaz/pi_compaction@v0.1.0
+pi install git:github.com/almogdepaz/pi-async-compaction@v0.1.0
 ```
 
 Local development:

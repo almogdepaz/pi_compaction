@@ -104,7 +104,7 @@ export default function asyncPrefixCompaction(pi: ExtensionAPI, injectedDeps: Pa
 		if (state.lastHandedOffJobId === marker.jobId) state.lastHandedOffJobId = undefined;
 		if (ctx.hasUI) {
 			const ui = ctx.ui;
-			setTimeout(() => ui.notify("Applied ready async prefix compaction", "info"), 0);
+			setTimeout(() => ui.notify("Applied ready async compaction", "info"), 0);
 		}
 	});
 
@@ -114,7 +114,7 @@ export default function asyncPrefixCompaction(pi: ExtensionAPI, injectedDeps: Pa
 	});
 
 	pi.registerCommand("async-compact-now", {
-		description: "Start async prefix compaction now",
+		description: "Start async compaction now",
 		handler: async (_args, ctx) => {
 			const message = formatManualStartOutcome(deps.startAsyncJob(ctx, state, { force: true }));
 			if (message && ctx.hasUI) ctx.ui.notify(message, "info");

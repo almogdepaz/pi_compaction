@@ -98,7 +98,7 @@ describe("extension hooks", () => {
 
 		expect(notifyMessages).toEqual([]);
 		await new Promise((resolve) => setTimeout(resolve, 0));
-		expect(notifyMessages).toEqual(["Applied ready async prefix compaction"]);
+		expect(notifyMessages).toEqual(["Applied ready async compaction"]);
 	});
 
 	test("applies a ready async compaction at safe agent end", async () => {

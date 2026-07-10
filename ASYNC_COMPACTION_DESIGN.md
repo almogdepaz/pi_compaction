@@ -1,4 +1,4 @@
-# async prefix compaction design
+# async compaction design
 
 This Pi extension precomputes Pi-compatible compaction summaries in the background, waits for a safe idle boundary before triggering Pi's compaction flow, and supplies the ready summary through Pi's normal compaction hook.
 
